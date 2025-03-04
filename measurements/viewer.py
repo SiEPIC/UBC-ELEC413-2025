@@ -269,7 +269,7 @@ class TabbedGUI(QMainWindow):
                         self.ax.plot(wavelengths, spectrum_data, label=f"channel:{i}")
         
         self.ax.set_xlabel("Wavelength [nm]")
-        self.ax.set_ylabel("Transmission [dB]")
+        self.ax.set_ylabel("Optical power [dBm]")
         self.ax.set_title(f"Spectrum Data for {title}")
         self.ax.grid(True)
 
@@ -491,7 +491,7 @@ def analyze_mat_file(mat_file_path, opt_in_name=''):
             plt.plot(wavelengths, spectrum_data, label=f"{channel_key}")
     
     plt.xlabel("Wavelength [nm]")
-    plt.ylabel("Transmission [dB]")
+    plt.ylabel("Optical power [dBm]")
     plt.title(f"Spectrum Data for {opt_in_name}")
     plt.legend()
     plt.grid(True)
