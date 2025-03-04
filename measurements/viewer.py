@@ -181,10 +181,22 @@ class TabbedGUI(QMainWindow):
         layout4.addWidget(self.text_output)
         self.tab4.setLayout(layout4)
         
+        # Tab 5: Analysis
+        self.tab5 = QWidget()
+        self.figure_analysis, self.ax_analysis = plt.subplots(2,1)
+        self.canvas_analysis = FigureCanvas(self.figure_analysis)
+        self.button_analysis = QPushButton("Run analysis")
+        self.button_analysis.clicked.connect(self.run_analysis)
+        layout5 = QVBoxLayout()
+        layout5.addWidget(self.canvas_analysis)
+        layout5.addWidget(self.button_analysis)
+        self.tab5.setLayout(layout5)
+                
         # Add tabs to the main layout
         self.tabs.addTab(self.tab2, "Layout")
         self.tabs.addTab(self.tab3, "Plot")
         self.tabs.addTab(self.tab4, "Netlist")
+        self.tabs.addTab(self.tab5, "Analysis")
         main_layout.addWidget(self.tabs, 3)  # Takes 3 parts of the space
         
         main_widget.setLayout(main_layout)
@@ -240,6 +252,159 @@ class TabbedGUI(QMainWindow):
             self.ax.legend()
         self.canvas.draw()
 
+    def run_analysis(self):
+        """
+        Run analysis on the selected data sets
+        - Waveguide propagation loss in dB/cm, for files: "wgloss...2379um" where the number is the length in microns
+        """
+        selected_items = [item.text() for item in self.listWidget.selectedItems()]
+        if len(selected_items)>1:
+            self.ax.set_title(f"Spectrum Data for selected files")
+            # find the selected data sets:
+            keys, files = [], []
+            for selected_key in selected_items:
+                if selected_key in self.matches:
+                    files.append ( self.matches[selected_key][0] ) # Get the first associated file
+                    keys.append ( selected_key )
+            if 'wgloss' in keys[0]:
+                self.run_analysis_cutback_loss(keys, files)
+        else:
+            print("Need to select 3 or more data sets.")
+
+    def run_analysis_cutback_loss(self, keys, file_paths):
+        import numpy as np
+        import scipy.io
+        import scipy.stats as stats
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        from scipy.signal import savgol_filter
+
+        self.ax_analysis[0].clear()
+        self.ax_analysis[1].clear()
+
+        import re
+        lengths = []
+        for k in keys:
+            # Extract the last numerical field using regex
+            match = re.search(r'_(\d+)um$', k)
+            # Extracted number
+            extracted_number = int(match.group(1)) if match else None
+            lengths.append(extracted_number)
+        
+        # Corresponding lengths
+        lengths_cm = np.array(lengths) / 1e4  # Convert microns to cm
+
+        # Load data from each file
+        data_sets = {}
+        for file_path, length in zip(file_paths, lengths):
+            mat_data = scipy.io.loadmat(file_path)
+            test_result = mat_data.get('testResult')
+            
+            # Extract wavelength and channel_1 data
+            wavelengths = np.reshape(test_result[0, 0]['header'][0, 0]['wavelength'][0], (-1,))
+            channel_1 = test_result[0, 0]['rows']['channel_1'][0, 0][:, 0]
+            
+            # Expand wavelength if needed
+            if len(wavelengths) == 1:
+                wavelengths = np.linspace(wavelengths[0], wavelengths[0] + (len(channel_1) - 1) * 0.008, len(channel_1))
+            
+            data_sets[length] = (wavelengths, channel_1)
+
+        # Compute the correct smoothing window size based on wavelength spacing
+        wavelength_spacing = abs(wavelengths[1]-wavelengths[0])  # nm per point
+        smoothing_window = int(5 / wavelength_spacing)  # Number of points in a 5 nm range
+        if smoothing_window % 2 == 0:
+            smoothing_window += 1  # Ensure odd window size
+
+        # Apply smoothing to each dataset
+        smoothed_data_sets = {}
+        for length, (wavelengths, channel_1) in data_sets.items():
+            smoothed_intensity = savgol_filter(channel_1, smoothing_window, polyorder=2)
+            smoothed_data_sets[length] = (wavelengths, smoothed_intensity)
+
+        # Perform linear regression for each valid wavelength
+        valid_wavelengths = []
+        slopes = []
+        slope_errors = []
+        common_wavelengths = sorted(set.intersection(*[set(data[0]) for data in smoothed_data_sets.values()]))
+
+        # Downsample the common wavelengths by a factor of 10
+        common_wavelengths = common_wavelengths[::10]
+
+        for wavelength in sorted(common_wavelengths):
+            intensities = []
+            valid_lengths = []
+            
+            for length, (wavelengths, smoothed_channel_1) in smoothed_data_sets.items():
+                idx = np.abs(wavelengths - wavelength).argmin()
+                intensity = smoothed_channel_1[idx]
+                
+                if intensity > -50:
+                    intensities.append(intensity)
+                    valid_lengths.append(lengths_cm[lengths.index(length)])
+            
+            if len(valid_lengths) >= 3:
+                valid_lengths = np.array(valid_lengths).reshape(-1, 1)
+                intensities = np.array(intensities)
+                
+                slope, intercept, r_value, p_value, std_err = stats.linregress(valid_lengths.flatten(), intensities)
+                t_critical = stats.t.ppf(0.975, len(valid_lengths) - 2)  # 95% confidence interval
+                slope_error = t_critical * std_err
+                
+                if slope_error < abs(slope):
+                    valid_wavelengths.append(wavelength)
+                    slopes.append(slope)
+                    slope_errors.append(slope_error)
+
+        # Store results in DataFrame
+        df_results_filtered = pd.DataFrame({
+            'Wavelength (nm)': valid_wavelengths,
+            'Slope (dB/cm)': slopes,
+            'Slope Error (dB/cm)': slope_errors
+        })
+
+        # Ensure valid numerical values
+        df_results_filtered = df_results_filtered.replace([np.inf, -np.inf], np.nan).dropna()
+
+        # Extract numerical values for plotting
+        wavelengths = df_results_filtered['Wavelength (nm)'].values.astype(float)
+        slopes = df_results_filtered['Slope (dB/cm)'].values.astype(float)
+        slope_errors = df_results_filtered['Slope Error (dB/cm)'].values.astype(float)
+
+        if not wavelengths.any():
+            print("No results found. Perhaps the uncertainty is higher than the value.")
+            return
+        
+        # Plot results
+        self.ax_analysis[0].plot(wavelengths, slopes, marker='o', linestyle='-', markersize=4, label='Slope', color='blue')
+        self.ax_analysis[0].fill_between(wavelengths, slopes - slope_errors, slopes + slope_errors, color='blue', alpha=0.2, label='95% Confidence Interval')
+        self.ax_analysis[0].set_xlabel('Wavelength (nm)')
+        self.ax_analysis[0].set_ylabel('Slope (dB/cm)')
+        self.ax_analysis[0].set_title('Smoothed Attenuation Slope vs. Wavelength (Filtered)')
+        self.ax_analysis[0].legend()
+        self.ax_analysis[0].grid(True)
+
+        # Select five evenly spaced wavelengths for curve fitting visualization
+        selected_wavelengths = np.linspace(wavelengths.min(), wavelengths.max(), 5)
+
+        # Plot curve fitting for selected wavelengths
+        for w in selected_wavelengths:
+            idx = np.abs(wavelengths - w).argmin()
+            selected_slope = slopes[idx]
+            selected_error = slope_errors[idx]
+            
+            self.ax_analysis[1].scatter(lengths_cm, [selected_slope * l for l in lengths_cm], marker='s', s=50)
+            self.ax_analysis[1].plot(lengths_cm, [selected_slope * l for l in lengths_cm], linestyle='--', label=f'{w:.1f} nm, Slope: {selected_slope:.2f} ± {selected_error:.2f} dB/cm')
+
+        self.ax_analysis[1].set_xlabel('Length (cm)')
+        self.ax_analysis[1].set_ylabel('Intensity (dB)')
+        self.ax_analysis[1].set_title('Curve Fitting for Selected Wavelengths')
+        self.ax_analysis[1].legend()
+        self.ax_analysis[1].grid(True)
+
+        self.canvas_analysis.draw()
+
+        
     def toggle_legend(self):
         """
         Toggles the visibility of the legend.
