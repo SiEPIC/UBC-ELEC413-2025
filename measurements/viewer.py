@@ -196,7 +196,7 @@ class TabbedGUI(QMainWindow):
         self.tabs.addTab(self.tab2, "Layout")
         self.tabs.addTab(self.tab3, "Plot")
         self.tabs.addTab(self.tab4, "Netlist")
-        self.tabs.addTab(self.tab5, "Analysis")
+        self.tabs.addTab(self.tab5, "wgloss Analysis")
         main_layout.addWidget(self.tabs, 3)  # Takes 3 parts of the space
         
         main_widget.setLayout(main_layout)
@@ -281,6 +281,7 @@ class TabbedGUI(QMainWindow):
 
         self.ax_analysis[0].clear()
         self.ax_analysis[1].clear()
+        self.canvas_analysis.draw()
 
         import re
         lengths = []
@@ -326,6 +327,9 @@ class TabbedGUI(QMainWindow):
         valid_wavelengths = []
         slopes = []
         slope_errors = []
+        intercepts = []
+        intensities1 = []
+        valid_lengths1 = []
         common_wavelengths = sorted(set.intersection(*[set(data[0]) for data in smoothed_data_sets.values()]))
 
         # Downsample the common wavelengths by a factor of 10
@@ -355,12 +359,16 @@ class TabbedGUI(QMainWindow):
                     valid_wavelengths.append(wavelength)
                     slopes.append(slope)
                     slope_errors.append(slope_error)
+                    intercepts.append(intercept)
+                    valid_lengths1.append(valid_lengths)
+                    intensities1.append(intensities)
 
         # Store results in DataFrame
         df_results_filtered = pd.DataFrame({
             'Wavelength (nm)': valid_wavelengths,
             'Slope (dB/cm)': slopes,
-            'Slope Error (dB/cm)': slope_errors
+            'Slope Error (dB/cm)': slope_errors,
+            'Intercept (dB)': intercepts,
         })
 
         # Ensure valid numerical values
@@ -370,17 +378,18 @@ class TabbedGUI(QMainWindow):
         wavelengths = df_results_filtered['Wavelength (nm)'].values.astype(float)
         slopes = df_results_filtered['Slope (dB/cm)'].values.astype(float)
         slope_errors = df_results_filtered['Slope Error (dB/cm)'].values.astype(float)
+        intercepts = df_results_filtered['Intercept (dB)'].values.astype(float)
 
         if not wavelengths.any():
-            print("No results found. Perhaps the uncertainty is higher than the value.")
+            print("No results found. Only values where the uncertainty is less than the value are considered.")
             return
         
         # Plot results
-        self.ax_analysis[0].plot(wavelengths, slopes, marker='o', linestyle='-', markersize=4, label='Slope', color='blue')
-        self.ax_analysis[0].fill_between(wavelengths, slopes - slope_errors, slopes + slope_errors, color='blue', alpha=0.2, label='95% Confidence Interval')
+        self.ax_analysis[0].plot(wavelengths, -slopes, marker='o', linestyle='-', markersize=4, label='Propagation Loss', color='blue')
+        self.ax_analysis[0].fill_between(wavelengths, - slopes + slope_errors, - slopes - slope_errors, color='blue', alpha=0.2, label='95% Confidence Interval')
         self.ax_analysis[0].set_xlabel('Wavelength (nm)')
-        self.ax_analysis[0].set_ylabel('Slope (dB/cm)')
-        self.ax_analysis[0].set_title('Smoothed Attenuation Slope vs. Wavelength (Filtered)')
+        self.ax_analysis[0].set_ylabel('Propagation loss (dB/cm)')
+        self.ax_analysis[0].set_title('Propagation loss vs. Wavelength (Filtered, 5 nm)')
         self.ax_analysis[0].legend()
         self.ax_analysis[0].grid(True)
 
@@ -389,16 +398,20 @@ class TabbedGUI(QMainWindow):
 
         # Plot curve fitting for selected wavelengths
         for w in selected_wavelengths:
+
             idx = np.abs(wavelengths - w).argmin()
             selected_slope = slopes[idx]
+            selected_intercept = intercepts[idx]
             selected_error = slope_errors[idx]
-            
-            self.ax_analysis[1].scatter(lengths_cm, [selected_slope * l for l in lengths_cm], marker='s', s=50)
-            self.ax_analysis[1].plot(lengths_cm, [selected_slope * l for l in lengths_cm], linestyle='--', label=f'{w:.1f} nm, Slope: {selected_slope:.2f} ± {selected_error:.2f} dB/cm')
+            selected_lengths = valid_lengths1[idx]
+            selected_intensities = intensities1[idx]
+
+            self.ax_analysis[1].scatter(selected_lengths, selected_intensities, marker='s', s=50)
+            self.ax_analysis[1].plot(lengths_cm, [selected_intercept + selected_slope * l for l in lengths_cm], linestyle='--', label=f'{w:.1f} nm, Slope: {selected_slope:.2f} ± {selected_error:.2f} dB/cm')
 
         self.ax_analysis[1].set_xlabel('Length (cm)')
-        self.ax_analysis[1].set_ylabel('Intensity (dB)')
-        self.ax_analysis[1].set_title('Curve Fitting for Selected Wavelengths')
+        self.ax_analysis[1].set_ylabel('Intensity (dBm)')
+        # self.ax_analysis[1].set_title('Curve Fitting for Selected Wavelengths')
         self.ax_analysis[1].legend()
         self.ax_analysis[1].grid(True)
 
